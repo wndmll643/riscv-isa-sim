@@ -446,7 +446,15 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
     state.pc = (state.vstvec->read() & ~(reg_t)1) + vector;
     state.vscause->write(adjusted_cause | (interrupt ? interrupt_bit : 0));
     state.vsepc->write(epc);
-    state.vstval->write(t.get_tval());
+    /* boom-tuned 2026-06-22: vstval (Virtual Supervisor trap value) gets   */
+    /* the same illegal-instruction tval=0 convention. RISC-V Priv Spec    */
+    /* H-extension chapter mirrors stval semantics for vstval. (BOOM       */
+    /* doesn't use H-extension by default but the patch is consistent.)    */
+    {
+      reg_t tv = t.get_tval();
+      if (t.cause() == CAUSE_ILLEGAL_INSTRUCTION) tv = 0;
+      state.vstval->write(tv);
+    }
 
     reg_t s = state.sstatus->read();
     s = set_field(s, MSTATUS_SPIE, get_field(s, MSTATUS_SIE));
@@ -464,7 +472,17 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
     state.pc = (state.nonvirtual_stvec->read() & ~(reg_t)1) + vector;
     state.nonvirtual_scause->write(t.cause());
     state.nonvirtual_sepc->write(epc);
-    state.nonvirtual_stval->write(t.get_tval());
+    /* boom-tuned 2026-06-22: same illegal-instruction stval=0 convention   */
+    /* as the M-mode mtval delivery below. RISC-V Priv Spec §5.1.10        */
+    /* "Supervisor Trap Value (stval) Register" mirrors the mtval text:    */
+    /*   "When a trap is taken into S-mode, stval is either set to zero or */
+    /*    written with exception-specific information..." Same             */
+    /*    implementation-choice freedom as mtval.                          */
+    {
+      reg_t tv = t.get_tval();
+      if (t.cause() == CAUSE_ILLEGAL_INSTRUCTION) tv = 0;
+      state.nonvirtual_stval->write(tv);
+    }
     state.htval->write(t.get_tval2());
     state.htinst->write(t.get_tinst());
 
@@ -510,7 +528,29 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
     state.pc = !nmie ? rnmi_trap_handler_address : trap_handler_address;
     state.mepc->write(epc);
     state.mcause->write(supv_double_trap ? CAUSE_DOUBLE_TRAP : t.cause());
-    state.mtval->write(t.get_tval());
+    /* boom-tuned 2026-06-22: BOOM's chipyard config sets mtval=0 on        */
+    /* illegal-instruction traps. Upstream Spike sets mtval = insn.bits()  */
+    /* (the offending instruction encoding).                                */
+    /*                                                                    */
+    /* RISC-V Priv Spec §3.1.16 "Machine Trap Value (mtval) Register":     */
+    /*   "When a trap is taken into M-mode, mtval is either set to zero or */
+    /*    written with exception-specific information... The hardware     */
+    /*    platform will specify which exceptions must set mtval            */
+    /*    informatively and which may unconditionally set it to zero."    */
+    /*   "If mtval is written with a nonzero value on illegal-instruction */
+    /*    exceptions, then mtval will contain the shortest of: the actual */
+    /*    faulting instruction; a truncated version..."                   */
+    /* (paraphrased from spec v1.13)                                        */
+    /*                                                                    */
+    /* Both BOOM (mtval=0) and Spike (mtval=insn.bits()) are spec-       */
+    /* compliant — the spec gives implementations a choice. Patch Spike    */
+    /* to match BOOM's mtval=0 convention on illegal-instruction so        */
+    /* differential testing doesn't flag this as a divergence.             */
+    {
+      reg_t tv = t.get_tval();
+      if (t.cause() == CAUSE_ILLEGAL_INSTRUCTION && !supv_double_trap) tv = 0;
+      state.mtval->write(tv);
+    }
     state.mtval2->write(supv_double_trap ? t.cause() : t.get_tval2());
     state.mtinst->write(t.get_tinst());
 

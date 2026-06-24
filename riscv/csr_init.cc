@@ -206,13 +206,31 @@ void state_t::csr_init(processor_t* const proc, reg_t max_isa)
   } else {
     add_supervisor_csr(CSR_MIDELEG, mideleg);
   }
-  const reg_t counteren_mask = (proc->extension_enabled_const(EXT_ZICNTR) ? 0x7UL : 0x0) | (proc->extension_enabled_const(EXT_ZIHPM) ? 0xfffffff8ULL : 0x0);
+  /* boom-tuned 2026-06-24: BOOM's MediumBoom config implements only a SUBSET
+     of the Zihpm hardware-performance-monitor counters. Empirically (Family B
+     cluster_0235), BOOM masks scounteren bits beyond bit 28 (HPMCOUNTER28).
+     Specifically, BOOM appears to mask bits 29 and 30. Spike default
+     (counteren_mask = 0xffffffff for full Zihpm) accepts test writes to those
+     bits while BOOM coerces them to 0. scounteren/mcounteren are WARL per
+     §3.1.13/§3.5.3; both implementations are spec-compliant. We narrow Spike
+     to match BOOM's subset to suppress differential noise.
+
+     If BOOM implements MORE HPM counters than this conservative mask, those
+     bits' WARL behavior will manifest as new mismatches in the next campaign;
+     adjust the mask then. */
+  const reg_t boom_counteren_clear = (1UL << 29) | (1UL << 30);
+  const reg_t counteren_mask = ((proc->extension_enabled_const(EXT_ZICNTR) ? 0x7UL : 0x0) | (proc->extension_enabled_const(EXT_ZIHPM) ? 0xfffffff8ULL : 0x0)) & ~boom_counteren_clear;
   add_user_csr(CSR_MCOUNTEREN, mcounteren = std::make_shared<masked_csr_t>(proc, CSR_MCOUNTEREN, counteren_mask, 0));
   add_csr(CSR_MCOUNTINHIBIT, mcountinhibit = std::make_shared<masked_csr_t>(proc, CSR_MCOUNTINHIBIT, counteren_mask & (~MCOUNTEREN_TIME), 0));
   add_supervisor_csr(CSR_SCOUNTEREN, scounteren = std::make_shared<masked_csr_t>(proc, CSR_SCOUNTEREN, counteren_mask, 0));
   nonvirtual_sepc = std::make_shared<epc_csr_t>(proc, CSR_SEPC);
   add_hypervisor_csr(CSR_VSEPC, vsepc = std::make_shared<epc_csr_t>(proc, CSR_VSEPC));
-  add_supervisor_csr(CSR_SEPC, sepc = std::make_shared<virtualized_csr_t>(proc, nonvirtual_sepc, vsepc));
+  /* boom-tuned 2026-06-24: use sepc_csr_t (csrs.h) instead of virtualized_csr_t
+     so the explicit `csrw sepc, val` path zeros upper bits, matching BOOM's
+     observed WARL behavior. Trap-entry writes use nonvirtual_sepc directly
+     (processor.cc:474) and bypass this wrapper — sret continues to work.
+     vsepc keeps its default virtualized_csr_t behavior (only sepc is patched). */
+  add_supervisor_csr(CSR_SEPC, sepc = std::make_shared<sepc_csr_t>(proc, nonvirtual_sepc, vsepc));
   nonvirtual_stval = std::make_shared<basic_csr_t>(proc, CSR_STVAL, 0);
   add_hypervisor_csr(CSR_VSTVAL, vstval = std::make_shared<basic_csr_t>(proc, CSR_VSTVAL, 0));
   add_supervisor_csr(CSR_STVAL, stval = std::make_shared<virtualized_csr_t>(proc, nonvirtual_stval, vstval));

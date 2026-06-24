@@ -15,6 +15,25 @@ clint_t::clint_t(const simif_t* sim, uint64_t freq_hz, bool real_time)
 
   real_time_ref_secs = base.tv_sec;
   real_time_ref_usecs = base.tv_usec;
+
+  /* boom-tuned 2026-06-22: pre-populate mtimecmp[hart] = UINT64_MAX so   */
+  /* MTIP (Machine Timer Interrupt Pending, mip bit 7) does NOT fire      */
+  /* instantly post-reset. Upstream Spike defaults missing-from-map       */
+  /* mtimecmp entries to 0, so with mtime ticking up MTIP becomes 1       */
+  /* within the first cycle — before any test prologue has a chance to    */
+  /* write mtimecmp. BOOM's chipyard CLINT defaults differ.               */
+  /*                                                                    */
+  /* RISC-V Priv Spec §3.2.1 "Machine Timer Registers (mtime and          */
+  /* mtimecmp)" states mtimecmp is a platform-defined memory-mapped       */
+  /* register; the spec does NOT mandate a specific reset value. Both     */
+  /* "mtimecmp = 0 at reset" (Spike) and "mtimecmp = nonzero at reset"   */
+  /* (BOOM) are spec-compliant — the platform spec defines reset value.  */
+  /* (paraphrased from spec v1.13)                                        */
+  /* We set UINT64_MAX so that even before any prologue runs, MTIP=0 in  */
+  /* both Spike and BOOM, matching BOOM's effective post-reset state for */
+  /* differential testing purposes.                                       */
+  mtimecmp[0] = ~uint64_t(0);
+
   tick(0);
 }
 
