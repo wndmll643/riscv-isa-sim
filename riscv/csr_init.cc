@@ -225,12 +225,9 @@ void state_t::csr_init(processor_t* const proc, reg_t max_isa)
   add_supervisor_csr(CSR_SCOUNTEREN, scounteren = std::make_shared<masked_csr_t>(proc, CSR_SCOUNTEREN, counteren_mask, 0));
   nonvirtual_sepc = std::make_shared<epc_csr_t>(proc, CSR_SEPC);
   add_hypervisor_csr(CSR_VSEPC, vsepc = std::make_shared<epc_csr_t>(proc, CSR_VSEPC));
-  /* boom-tuned 2026-06-24: use sepc_csr_t (csrs.h) instead of virtualized_csr_t
-     so the explicit `csrw sepc, val` path zeros upper bits, matching BOOM's
-     observed WARL behavior. Trap-entry writes use nonvirtual_sepc directly
-     (processor.cc:474) and bypass this wrapper — sret continues to work.
-     vsepc keeps its default virtualized_csr_t behavior (only sepc is patched). */
-  add_supervisor_csr(CSR_SEPC, sepc = std::make_shared<sepc_csr_t>(proc, nonvirtual_sepc, vsepc));
+  /* REVERTED 2026-06-24: sepc_csr_t patch was based on wrong premise about
+     BOOM's csrw sepc behavior. Stock virtualized_csr_t restored. */
+  add_supervisor_csr(CSR_SEPC, sepc = std::make_shared<virtualized_csr_t>(proc, nonvirtual_sepc, vsepc));
   nonvirtual_stval = std::make_shared<basic_csr_t>(proc, CSR_STVAL, 0);
   add_hypervisor_csr(CSR_VSTVAL, vstval = std::make_shared<basic_csr_t>(proc, CSR_VSTVAL, 0));
   add_supervisor_csr(CSR_STVAL, stval = std::make_shared<virtualized_csr_t>(proc, nonvirtual_stval, vstval));
@@ -245,7 +242,7 @@ void state_t::csr_init(processor_t* const proc, reg_t max_isa)
   auto nonvirtual_satp = std::make_shared<satp_csr_t>(proc, CSR_SATP);
   add_hypervisor_csr(CSR_VSATP, vsatp = std::make_shared<base_atp_csr_t>(proc, CSR_VSATP));
   add_supervisor_csr(CSR_SATP, satp = std::make_shared<virtualized_satp_csr_t>(proc, nonvirtual_satp, vsatp));
-  nonvirtual_scause = std::make_shared<cause_csr_t>(proc, CSR_SCAUSE);
+  nonvirtual_scause = std::make_shared<scause_csr_t>(proc, CSR_SCAUSE);
   add_hypervisor_csr(CSR_VSCAUSE, vscause = std::make_shared<cause_csr_t>(proc, CSR_VSCAUSE));
   add_supervisor_csr(CSR_SCAUSE, scause = std::make_shared<virtualized_csr_t>(proc, nonvirtual_scause, vscause));
   mtval2 = std::make_shared<mtval2_csr_t>(proc, CSR_MTVAL2);

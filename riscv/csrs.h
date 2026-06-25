@@ -181,29 +181,13 @@ class virtualized_csr_t: public csr_t {
 
 typedef std::shared_ptr<virtualized_csr_t> virtualized_csr_t_p;
 
-// boom-tuned 2026-06-24: sepc-only WARL coercion subclass.
-//
-// BOOM's MediumBoom config zeros the upper bits of any explicit `csrw sepc, val`
-// from supervisor software (it does NOT zero implicit trap-entry writes to
-// nonvirtual_sepc — those still capture the trap PC, used by sret). Spike
-// default preserves the test-supplied value verbatim, causing Family-A
-// differential noise (clusters 0120 / 0121 / 0167 / 0242).
-//
-// sepc is WARL per RV-Priv §5.1.7. Both behaviors are spec-compliant. We narrow
-// Spike to match BOOM by overriding ONLY the virtualized-wrapper's
-// unlogged_write — the explicit-csrw path. The trap-entry path uses
-// nonvirtual_sepc->write(epc) directly (processor.cc line 474) and bypasses
-// this wrapper, so it remains untouched and sret continues to work correctly.
-//
-// Note: only sepc is patched. vsepc keeps its default virtualized_csr_t
-// behavior. mepc is a different class instance entirely (epc_csr_t in
-// machine.csr namespace), not affected.
-class sepc_csr_t: public virtualized_csr_t {
- public:
-  sepc_csr_t(processor_t* const proc, csr_t_p orig, csr_t_p virt);
- protected:
-  virtual bool unlogged_write(const reg_t val) noexcept override;
-};
+// REVERTED 2026-06-24: the sepc_csr_t WARL patch was based on an incorrect
+// hypothesis about BOOM's csrw sepc behavior. BOOM actually does
+// `reg_sepc <= {wdata[39:1], 1'h0}` (truncate to 40 bits + clear bit 0),
+// not force-zero. Force-zeroing Spike on csrw sepc was over-aggressive and
+// caused artificial divergences. Removed the subclass; sepc now uses stock
+// virtualized_csr_t. If we want BOOM parity later, the proper mask would be
+// `val & 0xFFFFFFFFFE` (clear bit 0). See conversation 2026-06-24 ~08:20Z.
 
 // For mepc, sepc, and vsepc
 class epc_csr_t: public csr_t {
@@ -235,6 +219,19 @@ class cause_csr_t: public basic_csr_t {
   cause_csr_t(processor_t* const proc, const reg_t addr);
 
   virtual reg_t read() const noexcept override;
+};
+
+// BOOM-tuning: narrow scause software writes to the legal mask (bit 63 +
+// low 5 bits = code field for codes 0-31), matching chipyard rocket-chip
+// CSRFile.sv reg_scause <= wdata & 64'h800000000000001F. The spec marks
+// these bits WLRL, so Spike's default "preserve everything" and BOOM's
+// "drop reserved bits" are both legal — this class makes Spike mirror
+// BOOM for differential-testing parity.
+class scause_csr_t: public cause_csr_t {
+ public:
+  scause_csr_t(processor_t* const proc, const reg_t addr);
+ protected:
+  virtual bool unlogged_write(const reg_t val) noexcept override;
 };
 
 // For *status family of CSRs

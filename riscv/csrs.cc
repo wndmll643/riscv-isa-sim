@@ -401,23 +401,10 @@ bool virtualized_csr_t::unlogged_write(const reg_t val) noexcept {
   return false; // virt_csr or orig_csr has already logged
 }
 
-// boom-tuned 2026-06-24: sepc-only WARL coercion. See csrs.h for rationale.
-// Coerces explicit `csrw sepc, val` writes from supervisor software to 0,
-// matching BOOM's observed behavior. Implicit trap-entry writes use
-// nonvirtual_sepc->write(epc) directly (see processor.cc:474), bypassing this
-// wrapper and remaining unaffected — sret continues to find the real trap PC.
-sepc_csr_t::sepc_csr_t(processor_t* const proc, csr_t_p orig, csr_t_p virt):
-  virtualized_csr_t(proc, orig, virt) {
-}
-
-bool sepc_csr_t::unlogged_write(const reg_t val) noexcept {
-  // Coerce the explicit-csrw value to 0 before passing through to the
-  // underlying epc storage. BOOM masks all upper bits to 0 on explicit
-  // csrw to sepc (Family-A empirical finding); bit 0 stays clear anyway
-  // because epc_csr_t::unlogged_write already enforces `& ~1`.
-  (void)val;
-  return virtualized_csr_t::unlogged_write(0);
-}
+// REVERTED 2026-06-24: sepc_csr_t patch removed. The "csrw sepc → 0" claim
+// was empirically wrong — BOOM does `reg_sepc <= {wdata[39:1], 1'h0}`
+// (truncate + bit-0 align), not force-zero. The over-aggressive force-zero
+// caused artificial divergences in S-mode-trap-heavy tests.
 
 // implement class epc_csr_t
 epc_csr_t::epc_csr_t(processor_t* const proc, const reg_t addr):
@@ -462,6 +449,22 @@ reg_t cause_csr_t::read() const noexcept {
   if (proc->get_isa().get_max_xlen() > proc->get_xlen()) // Move interrupt bit to top of xlen
     return val | ((val >> (proc->get_isa().get_max_xlen()-1)) << (proc->get_xlen()-1));
   return val;
+}
+
+// implement class scause_csr_t -- BOOM-tuned narrow mask
+scause_csr_t::scause_csr_t(processor_t* const proc, const reg_t addr):
+  cause_csr_t(proc, addr) {
+}
+
+bool scause_csr_t::unlogged_write(const reg_t val) noexcept {
+  // Mask matches chipyard rocket-chip CSRFile.sv reg_scause write:
+  //   reg_scause <= wdata & 64'h800000000000001F
+  // i.e. bit 63 (interrupt flag) + bits 0-4 (exception code 0-31).
+  // Hardware-driven writes (from real exception entry) come through
+  // a different path that sets the cause directly; this only narrows
+  // software-issued csrw/csrrs/csrrc writes to scause.
+  const reg_t scause_legal_mask = (1ULL << 63) | 0x1F;
+  return basic_csr_t::unlogged_write(val & scause_legal_mask);
 }
 
 // implement class base_status_csr_t
