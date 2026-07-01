@@ -1045,26 +1045,44 @@ bool medeleg_csr_t::unlogged_write(const reg_t val) noexcept {
     /* This means both BOOM (writable) and Spike-with-Zca (hardwired-0)   */
     /* are spec-compliant. We patch Spike to match BOOM's WARL choice so  */
     /* differential testing doesn't flag this as a divergence.            */
-    | (1 << CAUSE_MISALIGNED_FETCH)
-    | (1 << CAUSE_FETCH_ACCESS)
-    | (1 << CAUSE_ILLEGAL_INSTRUCTION)
-    | (1 << CAUSE_BREAKPOINT)
-    | (1 << CAUSE_MISALIGNED_LOAD)
-    | (1 << CAUSE_LOAD_ACCESS)
-    | (1 << CAUSE_MISALIGNED_STORE)
-    | (1 << CAUSE_STORE_ACCESS)
-    | (1 << CAUSE_USER_ECALL)
-    /* boom-tuned 2026-06-23: CAUSE_SUPERVISOR_ECALL (bit 9) intentionally
-       OMITTED. BOOM's MediumBoom config does NOT include bit 9 in its
-       `delegable_exceptions` set — S-mode ecall always traps to M-mode
-       in BOOM. medeleg.bit9 reads as 0. Spike default (writable) caused
-       Family-C differential mismatch (cluster_0013). medeleg is WARL per
-       §3.1.8 so both implementations are spec-compliant; we match BOOM's
-       stuck-at-zero choice to suppress this differential noise. */
+    /* boom-tuned 2026-06-28: tightened from the prior 0x?C0FF mask to the
+       exact 16'hB15D BOOM RTL read-mask (chipyard MediumBoomV3Config
+       CSRFile.sv:269 `reg_medeleg[15:0] & 16'hB15D`). The prior mask was
+       too permissive — it kept bits 1, 5, 7 (access-fault delegation) and
+       18, 19 (software-check / hardware-error) which BOOM zeros on read.
+       This caused tests that write all-ones-style values to medeleg to
+       diverge: Spike preserved those bits, BOOM zeroed them. Both spec-
+       compliant per §3.1.8, but now bit-exact on read-back.
+
+       0xB15D bit-by-bit (0=read-only-zero in BOOM, 1=delegable):
+         bit  0  MISALIGNED_FETCH          ← keep (set in 0xB15D)
+         bit  1  FETCH_ACCESS              ← REMOVED (0xB15D bit 1 = 0)
+         bit  2  ILLEGAL_INSTRUCTION       ← keep
+         bit  3  BREAKPOINT                ← keep
+         bit  4  MISALIGNED_LOAD           ← keep
+         bit  5  LOAD_ACCESS               ← REMOVED (0xB15D bit 5 = 0)
+         bit  6  MISALIGNED_STORE          ← keep
+         bit  7  STORE_ACCESS              ← REMOVED (0xB15D bit 7 = 0)
+         bit  8  USER_ECALL                ← keep
+         bit  9  SUPERVISOR_ECALL          ← already omitted (prior patch)
+         bit 12  FETCH_PAGE_FAULT          ← keep (via mmu_exceptions)
+         bit 13  LOAD_PAGE_FAULT           ← keep (via mmu_exceptions)
+         bit 15  STORE_PAGE_FAULT          ← keep (via mmu_exceptions)
+         bit 18  SOFTWARE_CHECK_FAULT      ← REMOVED (BOOM keeps low 16 only)
+         bit 19  HARDWARE_ERROR_FAULT      ← REMOVED (BOOM keeps low 16 only)
+       Hypervisor bits remain conditional — preserved for non-BOOM Spike
+       use; BOOM has no H-extension so they never fire on differential. */
+    | (1 << CAUSE_MISALIGNED_FETCH)         //  0
+    | (1 << CAUSE_ILLEGAL_INSTRUCTION)      //  2
+    | (1 << CAUSE_BREAKPOINT)               //  3
+    | (1 << CAUSE_MISALIGNED_LOAD)          //  4
+    | (1 << CAUSE_MISALIGNED_STORE)         //  6
+    | (1 << CAUSE_USER_ECALL)               //  8
     | (proc->has_mmu() ? mmu_exceptions : 0)
     | (proc->extension_enabled('H') ? hypervisor_exceptions : 0)
-    | (1 << CAUSE_SOFTWARE_CHECK_FAULT)
-    | (1 << CAUSE_HARDWARE_ERROR_FAULT)
+    /* CAUSE_SOFTWARE_CHECK_FAULT (18) and CAUSE_HARDWARE_ERROR_FAULT (19)
+       intentionally OMITTED — BOOM's 16'hB15D RTL mask covers only bits
+       0-15, so 18/19 are stuck-at-zero on read. */
     ;
   return basic_csr_t::unlogged_write(val & mask);
 }
@@ -1189,6 +1207,30 @@ void satp_csr_t::verify_permissions(insn_t insn, bool write) const {
   base_atp_csr_t::verify_permissions(insn, write);
   if (get_field(state->mstatus->read(), MSTATUS_TVM))
     require(state->prv == PRV_M);
+}
+
+// boom-tuned 2026-06-28: BOOM's MediumBoom config implements satp.MODE as
+// {wdata[63], 3'h0} (only Bare or Sv39 representable; bits 60-62 hardwired
+// 0) and satp.PPN as {24'h0, wdata[19:0]} (only low 20 bits; high 24 bits
+// hardwired 0). See chipyard CSRFile.sv:736 and :898. Spike's default
+// compute_new_satp preserves a wider PPN (up to paddr_bits-PGSHIFT bits)
+// and accepts any spec-legal MODE. Both are spec-compliant per §4.1.11
+// "satp is a WARL register ... PPN field is implementation-defined width
+// and may be hardwired in unused bits". We narrow to BOOM's exact RTL
+// clip only when paddr_bits matches BOOM's 32-bit config — keeping wider
+// Spike behavior intact for other targets.
+bool satp_csr_t::unlogged_write(const reg_t val) noexcept {
+  /* boom-tuned: apply BOOM's two-field clip unconditionally. This Spike
+     fork targets BOOM, so the clip is always desired — same approach as
+     the pmpaddr_csr_t patch that hardcodes BOOM_PADDR_BITS=32. Spike's
+     default paddr_bits() returns 56 (RV64), so a runtime gate would never
+     fire. Going through the base path after clipping preserves the MMU
+     flush + satp_valid() check. */
+  const reg_t boom_mode_mask = (reg_t)1 << 63;          // keep only wdata[63]
+  const reg_t boom_ppn_mask  = ((reg_t)1 << 20) - 1;    // keep only wdata[19:0]
+  const reg_t boom_asid_mask = SATP64_ASID;             // ASID field unchanged
+  const reg_t clipped = (val & (boom_mode_mask | boom_asid_mask | boom_ppn_mask));
+  return base_atp_csr_t::unlogged_write(clipped);
 }
 
 virtualized_satp_csr_t::virtualized_satp_csr_t(processor_t* const proc, satp_csr_t_p orig, csr_t_p virt):

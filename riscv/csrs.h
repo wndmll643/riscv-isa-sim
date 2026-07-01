@@ -557,10 +557,19 @@ class base_atp_csr_t: public basic_csr_t {
   reg_t compute_new_satp(reg_t val) const noexcept;
 };
 
+// BOOM-tuning 2026-06-28: BOOM's chipyard MediumBoom config implements
+// satp as a heavily restricted WARL register (CSRFile.sv lines 736+898):
+//   reg_satp_mode <= {wdata[63], 3'h0};        // mode = Bare(0) or Sv39(8)
+//   reg_satp_ppn  <= {24'h0, wdata[19:0]};     // PPN width = 20 bits
+// satp_csr_t overrides unlogged_write to apply these clips when the proc
+// is BOOM-shaped (paddr_bits == 32). Spike's default behavior is preserved
+// for non-BOOM configs.
 class satp_csr_t: public base_atp_csr_t {
  public:
   satp_csr_t(processor_t* const proc, const reg_t addr);
   virtual void verify_permissions(insn_t insn, bool write) const override;
+ protected:
+  virtual bool unlogged_write(const reg_t val) noexcept override;
 };
 
 typedef std::shared_ptr<satp_csr_t> satp_csr_t_p;
